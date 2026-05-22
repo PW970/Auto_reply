@@ -55,7 +55,7 @@ wechat-cli search 拉当天上下文
 - [x] Qwen LangGraph ReAct Agent 调用工具发回复
 - [x] **Windows** 桌面微信发送(uiautomation)
 - [x] **macOS** 桌面微信发送(AppleScript + System Events,需授权辅助功能)
-- [x] 手机端 ADB + Midscene 发送
+- [x] 手机端 ADB + Midscene 发送(设备 ID 通过 `ADB_DEVICE_ID` 配置,单设备时自动选)
 - [x] 动态发现本机 CLI 工具(claude / hermes / opencode 等)作为额外 Agent 工具
 - [x] 简单 Web 管理界面(状态/白名单/发送方式/日志/测试对话)
 
@@ -66,7 +66,6 @@ wechat-cli search 拉当天上下文
 - [ ] **历史聊天导入与本地存储**(暂缓)
 - [ ] **风格学习** — 目前只有静态 `personality` 字符串
 - [ ] **per-contact 风格画像** — 跟老板/哥们/家人不同语气
-- [ ] **手机端 DEVICE_ID 配置化**(目前硬编码)
 - [ ] **回复修改 feedback 回流** — 用户改写草稿的差异作为后续学习样本
 - [ ] **消息去重幂等**
 - [ ] DeepSeek 同时承担"生成"职责(目前仅分析,生成仍走 Qwen)
@@ -225,7 +224,6 @@ Web UI 当前能力:
 - **风险分级未真正拦截** — high 风险消息也会自动发,Rule Engine 还没做
 - **风格学习未实现** — 只有静态 personality,不会从历史聊天学
 - **macOS 桌面发送需要辅助功能授权** — 首次运行会被系统拦,需在 系统设置 → 隐私与安全性 → 辅助功能 中加入运行 Python 的终端
-- **手机端 DEVICE_ID 硬编码** — 见 `tools/midscene_send.js:13`
 - **`requirements.txt` 缺关键依赖** — `langgraph`、`uiautomation` 未列出
 - **无消息去重** — 依赖 `wechat-cli new-messages` 自身的增量语义
 - **`/api/chat` 无鉴权** — 默认监听 `0.0.0.0:5679`,生产场景应改为 `127.0.0.1` + token

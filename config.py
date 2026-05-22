@@ -49,6 +49,8 @@ MIDSCENE_ENV = {
     "MIDSCENE_MODEL_REASONING_ENABLED": "false",
 }
 
+ADB_DEVICE_ID = env("ADB_DEVICE_ID", "")
+
 # ── wechat-cli 路径（自动检测） ──
 def _find_wechat_cli() -> str:
     custom = env("WECHAT_CLI_PATH")
