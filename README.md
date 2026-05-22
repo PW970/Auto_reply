@@ -1,160 +1,105 @@
-# WeChat Auto Agent
+<h1 align="center">WeChat Auto Agent</h1>
 
-一个本地运行的微信自动回复项目,目标是做成**个性化微信分身**:基于 DeepSeek 理解对方的消息,再用学习了你说话风格的模型生成回复,自动发回微信。
+<p align="center">
+  <b>从你的改写中学习如何像你本人说话的微信自动回复分身</b><br/>
+  <sub>DeepSeek 分析意图与风险 · 结构化风格画像 · 高风险消息一键审批 · Win/Mac/手机三端可发</sub>
+</p>
 
-> ⚠️ 当前仓库处于早期阶段,核心闭环已经跑通,但"风格学习"和"风险拦截"等关键能力还在路线图上,详见下文。
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <a href="https://github.com/PW970/Auto_reply/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PW970/Auto_reply?style=social"></a>
+</p>
 
-## 设计目标
+<p align="center">
+  <i>📹 演示动图待录制 — <code>docs/demo.gif</code></i>
+</p>
 
-不是"调用大模型生成通用回复"的助手,而是希望最终具备这些能力:
+---
 
-1. **会读消息** — 自动读取微信好友新消息
-2. **先理解再答** — 用 DeepSeek 分析意图、情绪、风险等级
-3. **像你本人说话** — 不是 AI 腔,而是你的语气、措辞、句长、口头禅
-4. **越用越像** — 从历史聊天和你的修改行为中持续学习
-5. **可控自动化** — 不是无脑全自动,高风险消息可拦截/转人工
+## 这个项目和别的"AI 微信回复"不一样在哪
 
-## 当前实现
+大多数微信自动回复项目都是 *"接个 LLM 把回复套个壳发出去"*。这个项目不是。
 
-主流程:
+- **先理解再答** — 每条新消息先经过 DeepSeek 提取意图、情绪、**风险等级**,再决定怎么回
+- **不只是 prompt 套人设** — 结构化风格画像(语气/句长/标点/emoji/口头禅/禁用词),**支持按联系人覆写**,跟老板和哥们语气自动切换
+- **越用越像你** — 你在 Web UI 上每改一次草稿,系统就把"AI 草稿 vs 你的版本"存下来,下次同联系人来消息直接当 few-shot 用
+- **高风险不乱发** — DeepSeek 标 `risk=high` 的消息(涉及金钱/约定/敏感话题)自动转草稿队列,人工审批后才发
+- **三端通吃** — Windows uiautomation / macOS AppleScript / 安卓 ADB+Midscene,同一个 Agent 接口
 
-```text
-wechat-cli new-messages (1s 轮询)
-        │
-        ▼
-   命中白名单联系人?
-        │ 是
-        ▼
-wechat-cli search 拉当天上下文
-        │
-        ▼
-┌──────────────────────────────┐
-│ DeepSeek 预分析 (analyzer.py) │
-│  → intent / emotion / risk   │
-│    summary / reply_hint      │
-└──────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────┐
-│ Qwen ReAct Agent (agent.py)  │
-│  输入 = 上下文 + 分析简报    │
-│  输出 = 调用 send_xxx 工具   │
-└──────────────────────────────┘
-        │
-        ▼
-   桌面微信(Win) / 手机(ADB)
-```
+## 5 分钟跑起来
 
-### 已实现
-
-- [x] `wechat-cli new-messages` 轮询新消息
-- [x] 联系人白名单触发
-- [x] `wechat-cli search` 拉取当天上下文
-- [x] **DeepSeek 预分析层**:每条消息先做 intent / emotion / risk / summary / reply_hint 五项分析,结果注入 Qwen prompt
-- [x] DeepSeek 失败/未配置时优雅降级,主流程不中断
-- [x] **risk=high 走草稿审批,Web UI 一键通过/改写/拒绝**
-- [x] **结构化风格画像 + per-contact 覆写** — 不再是单条 `personality` 字符串
-- [x] **改写 feedback 自动回流** — 用户改写过的草稿自动作为 few-shot 注入下次同联系人 prompt
-- [x] Qwen LangGraph ReAct Agent 调用工具发回复
-- [x] **Windows** 桌面微信发送(uiautomation)
-- [x] **macOS** 桌面微信发送(AppleScript + System Events,需授权辅助功能)
-- [x] 手机端 ADB + Midscene 发送(设备 ID 通过 `ADB_DEVICE_ID` 配置,单设备时自动选)
-- [x] 动态发现本机 CLI 工具(claude / hermes / opencode 等)作为额外 Agent 工具
-- [x] 简单 Web 管理界面(状态/白名单/发送方式/日志/测试对话)
-
-### 还没实现(路线图)
-
-- [ ] **历史聊天导入与本地存储**(暂缓)
-- [ ] **离线风格统计模块** — 从 feedback 样本聚合自动建议 `catchphrases` / `avoid`
-- [ ] **回复修改 feedback 回流** — 用户改写草稿的差异作为后续学习样本
-- [ ] **消息去重幂等**
-- [ ] DeepSeek 同时承担"生成"职责(目前仅分析,生成仍走 Qwen)
-
-## 目录结构
-
-```text
-.
-├── app.py                  # FastAPI 服务 + 后台轮询
-├── agent.py                # Qwen LangGraph ReAct Agent
-├── analyzer.py             # DeepSeek 预分析层 ★
-├── config.py               # .env 加载、wechat-cli 路径、配置
-├── schemas.py              # 数据结构(预留)
-├── requirements.txt
-├── templates/index.html    # Web 管理界面
-└── tools/
-    ├── wechat_read.py      # search / new-messages / contacts
-    ├── wechat_send.py      # 桌面微信 send tool
-    ├── wx_send.py          # uiautomation 实现(Windows)
-    ├── phone_control.py    # 手机 send tool
-    └── midscene_send.js    # Midscene + ADB 控制手机微信
-```
-
-## 运行环境
-
-### 1. Python 依赖
+> 前置:已安装 [wechat-cli](https://github.com/dxz1/wechat-cli)、Python 3.10+,以及一个 [DeepSeek API key](https://platform.deepseek.com/)。
 
 ```bash
+git clone https://github.com/PW970/Auto_reply.git
+cd Auto_reply
 pip install -r requirements.txt
+cp .env.example .env             # 然后填 DEEPSEEK_API_KEY 和 QWEN_API_*
+python app.py                    # 打开 http://localhost:5679
 ```
 
-> 注意:`requirements.txt` 当前未列全。运行时还需要:
-> - `langgraph`(agent.py 用)
-> - `uiautomation`(仅 Windows 桌面发送时需要)
-> - DeepSeek 不需要额外 SDK,直接用 httpx 调
+在 Web UI 上加几个**测试联系人**到白名单,跟自己另一个微信号互发消息试一下。
 
-### 2. 必备外部依赖
+## 它能做什么
 
-| 依赖 | 用途 | 是否可选 |
+```text
+微信新消息
+    │
+    ▼
+┌─ DeepSeek 预分析 ─────────────────┐
+│ intent  / emotion / risk          │
+│ summary / reply_hint              │
+└───────────────────────────────────┘
+    │
+    ├─ risk = low/medium ─→ 直接生成 + 发送
+    │
+    └─ risk = high ────────→ 落草稿,Web UI 审批
+                                │
+                            通过/改写/拒绝
+                                │
+                            改写差异 → 下次 few-shot
+```
+
+| 模块 | 文件 | 做什么 |
 |---|---|---|
-| `wechat-cli` | 读取微信本地数据 | 必需 |
-| 微信桌面客户端(已登录) | 桌面发送 | 桌面模式必需 |
-| Node.js + ADB + 安卓设备 | 手机发送 | 手机模式必需 |
-| DeepSeek API key | 消息预分析 | 推荐(否则降级) |
-| Qwen 兼容端点 | 主 Agent | 必需 |
+| 入口 | `app.py` | FastAPI + 1s 轮询 + 风险路由 |
+| 预分析 | `analyzer.py` | DeepSeek → 结构化简报 |
+| Agent | `agent.py` | LangGraph ReAct,调发送工具 |
+| 风格 | `style.py` | 三层合并 + few-shot 注入 |
+| 草稿 | `drafts.py` | 高风险队列 + feedback 库 |
+| 桌面发送 | `tools/wx_send_{win,mac}.py` | uiautomation / AppleScript |
+| 手机发送 | `tools/midscene_send.js` | ADB + Midscene 视觉控制 |
 
-## 配置
+## 配置说明
 
-### 环境变量
-
-```bash
-cp .env.example .env
-```
-
-`.env.example` 主要字段:
+### `.env` — 模型和外部依赖
 
 ```env
-# Qwen — 主 Agent(回复生成)
-QWEN_API_BASE=http://localhost:8000/v1
-QWEN_API_KEY=your_api_key_here
-QWEN_MODEL=qwen3.6-27b
-
-# DeepSeek — 消息预分析层
+# DeepSeek — 消息预分析(没填则系统降级,主流程不中断)
 DEEPSEEK_API_BASE=https://api.deepseek.com/v1
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-chat
-DEEPSEEK_ENABLED=true
 
-# Midscene — 手机端视觉模型
-MIDSCENE_MODEL_BASE_URL=http://localhost:8000/v1
-MIDSCENE_MODEL_API_KEY=your_api_key_here
-MIDSCENE_MODEL_NAME=qwen3.6-27b
-MIDSCENE_MODEL_FAMILY=qwen3.6
-MIDSCENE_MODEL_REASONING_ENABLED=false
+# Qwen / OpenAI 兼容 — 主 Agent(回复生成)
+QWEN_API_BASE=http://localhost:8000/v1
+QWEN_API_KEY=
+QWEN_MODEL=qwen3.6-27b
 
-WECHAT_CLI_PATH=        # 留空则自动检测
+# 可选
+ADB_DEVICE_ID=                   # 多设备时指定;单设备自动选
+WECHAT_CLI_PATH=                 # 留空自动检测
 PORT=5679
-SELF_NAMES=我,你的微信名,你的姓名
+SELF_NAMES=我,你的昵称           # 用于跳过自己发的消息
 ```
 
-DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback 简报继续运行。
+> 主 Agent 走 **OpenAI 兼容协议**,所以可以替换为本地 vLLM、Ollama、SiliconFlow、OpenRouter 等任意兼容服务。
 
-### 联系人与风格配置
-
-启动后会读取/写入项目根目录的 `wechat_agent.json`:
+### `wechat_agent.json` — 白名单与风格画像
 
 ```json
 {
-  "enabled_contacts": ["联系人A", "联系人B"],
+  "enabled_contacts": ["张三", "老板"],
   "send_method": "desktop",
 
   "style_profile": {
@@ -164,10 +109,7 @@ DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback
     "emoji": "rarely",
     "catchphrases": ["行", "妥了", "整"],
     "avoid": ["亲", "宝子", "您"],
-    "examples": [
-      "行,我看下",
-      "明天上午整一下,问题不大"
-    ]
+    "examples": ["行,我看下", "明天上午整一下,问题不大"]
   },
 
   "contact_styles": {
@@ -177,118 +119,59 @@ DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback
       "emoji": "never",
       "catchphrases": ["收到", "好的"]
     }
-  },
-
-  "personality": "直爽、干脆,像哥们聊天",
-
-  "available_cli_tools": {
-    "claude": "claude"
   }
 }
 ```
 
-| 字段 | 含义 |
+完整字段:
+
+| 字段 | 取值 |
 |---|---|
-| `enabled_contacts` | 触发自动回复的联系人白名单 |
-| `send_method` | `desktop` 或 `phone` |
-| `style_profile` | 全局风格画像(结构化,见下表) |
-| `contact_styles` | 按联系人覆写,字段同 `style_profile`,留空字段用全局兜底 |
-| `personality` | **向后兼容**:没填 `style_profile` 时作为 `tone` 使用 |
-| `available_cli_tools` | 可选,注册额外 CLI 工具(只有命令在 PATH 中才会真正注册) |
+| `tone` | 自由文本,整体语气 |
+| `sentence_length` | `short` / `medium` / `long` / `mixed` |
+| `punctuation` | `casual` / `standard` / `strict` |
+| `emoji` | `never` / `rarely` / `often` |
+| `catchphrases` | 字符串数组,你的口头禅 |
+| `avoid` | 字符串数组,禁用词(比如 AI 腔的"宝子""亲") |
+| `examples` | 字符串数组,2-5 条最有代表性的真实回复 |
 
-#### `style_profile` / `contact_styles` 字段
+`contact_styles[X]` 中没填的字段会自动从 `style_profile` 兜底,只覆写需要差异化的部分。
 
-| 字段 | 取值 | 说明 |
-|---|---|---|
-| `tone` | 自由文本 | 整体语气描述 |
-| `sentence_length` | `short` / `medium` / `long` / `mixed` | 句长偏好 |
-| `punctuation` | `casual` / `standard` / `strict` | 标点风格 |
-| `emoji` | `never` / `rarely` / `often` | emoji 使用频率 |
-| `catchphrases` | 字符串数组 | 你的口头禅 |
-| `avoid` | 字符串数组 | 禁用词/句式(比如 AI 腔的"宝子""亲") |
-| `examples` | 字符串数组 | 典型说话样本(2-5 条最佳) |
+老的 `personality: "..."` 字符串仍兼容,会作为 `tone` 使用。
 
-#### 风格自学习(feedback 回流)
+### 自学习(feedback 回流)
 
-每次你在 Web UI 上**修改**一条草稿后再发出,系统会把"AI 草稿 vs 你最终发出的版本"存到 `drafts.db`。下次同联系人来消息时,Agent 会拉最近 3 条改写样本作为 few-shot 注入 prompt — 你改一次,下次就开始往那个语气靠。
+每次你在 Web UI **修改一条草稿后发出**,系统就把 `(对方原话, AI 草稿, 你的版本)` 存到 `drafts.db`。下次同联系人来消息,Agent prompt 里会自动注入最近 3 条改写样本作 few-shot — 你改一次,下次就开始往那个语气靠。
 
-可以通过 API 查看已沉淀的样本:
 ```bash
 curl 'http://localhost:5679/api/feedback?contact=老板'
-curl 'http://localhost:5679/api/style?contact=老板'  # 查看合并后的最终画像
+curl 'http://localhost:5679/api/style?contact=老板'    # 查看合并后画像
 ```
 
-## 启动
+## 已实现 / 路线图
 
-```bash
-python app.py
-```
+✅ DeepSeek 预分析(意图/情绪/风险)· 风险分级审批 · 结构化风格画像 + per-contact 覆写 · feedback 自学习 · Win/Mac/手机三端发送 · Web 管理 UI
 
-打开 `http://localhost:5679`。
+⏳ 历史聊天导入(暂缓) · 离线风格统计(从 feedback 自动建议口头禅) · 消息去重幂等 · DeepSeek 同时承担生成职责
 
-Web UI 当前能力:
+## 安全与合规
 
-- 启停后台轮询
-- 编辑白名单联系人
-- 切换发送方式
-- 查看最近 50 行日志
-- 测试对话(直接调 Agent,不发微信)
+⚠️ **请认真读这一段。** 本项目依赖微信本地数据读取和 UI 自动化发送,有以下风险:
 
-启动后日志中会看到 DeepSeek 分析结果:
+- **账号风险** — 微信对自动化操作的检测策略不公开,理论上存在限制风险
+- **隐私边界** — 项目运行时会把白名单联系人的近期聊天上下文发给 DeepSeek/Qwen 模型服务
+- **本地端口暴露** — `app.py` 默认监听 `0.0.0.0:5679` 且 `/api/chat` 无鉴权,**生产环境务必改为 `127.0.0.1` 或加 token**
+- **macOS 需要辅助功能授权** — 首次运行系统会拦截,需在 系统设置 → 隐私与安全性 → 辅助功能 加入运行 Python 的终端
 
-```
-[DeepSeek] 张三 → intent=咨询 emotion=中性 risk=low | 问周末有没有空
-```
+**强烈建议**:先用一两个测试联系人 + 低风险场景验证,再考虑扩大启用范围。本项目按 MIT 协议提供,作者不对账号封停或隐私泄露承担责任。
 
-## 工作原理
+## 贡献与讨论
 
-### 消息流(`app.py:poll_loop`)
+- 发现 Bug 或想要新功能 → [Issues](https://github.com/PW970/Auto_reply/issues)
+- 提 PR 前最好先开 Issue 讨论方案,避免做完发现路线不一致
 
-1. 每秒调一次 `wechat-cli new-messages`
-2. 过滤命中 `enabled_contacts` 的消息
-3. 跳过 `SELF_NAMES` 中自己发的消息
-4. 调 `wechat-cli search` 拉当天最近 15 条上下文
-5. **调 `analyzer.analyze_message()` 走 DeepSeek 拿结构化分析**
-6. 把上下文 + 分析简报 + personality 拼成 prompt
-7. 调 Qwen Agent → Agent 决定是否调用 `send_wechat_message` / `send_via_phone`
-8. 工具完成 UI 自动化操作
+如果这个项目对你有帮助,欢迎点 ⭐ — 这对维护者继续投入有非常大的激励作用。
 
-### DeepSeek 简报结构
+## License
 
-```python
-{
-  "intent": "闲聊|咨询|请求|约定|工作安排|情感倾诉|敏感话题|其他",
-  "emotion": "中性|开心|不满|焦虑|急切|难过",
-  "risk": "low|medium|high",
-  "summary": "一句话概括对方说了什么",
-  "reply_hint": "给生成层的核心要点提示"
-}
-```
-
-`risk` 字段是为后续 Rule Engine 准备的入口,目前只在日志打印,**还没真的拦截 high**。
-
-## 已知限制
-
-- **macOS 桌面发送需要辅助功能授权** — 首次运行会被系统拦,需在 系统设置 → 隐私与安全性 → 辅助功能 中加入运行 Python 的终端
-- **风格学习初版** — 当前仅靠 feedback 改写样本做 few-shot,没有"全量历史导入 + 离线统计"那套深度学习,样本积累需要时间
-- **`requirements.txt` 缺关键依赖** — `langgraph`、`uiautomation` 未列出
-- **无消息去重** — 依赖 `wechat-cli new-messages` 自身的增量语义
-- **`/api/chat` 无鉴权** — 默认监听 `0.0.0.0:5679`,生产场景应改为 `127.0.0.1` + token
-
-## 适合的使用方式
-
-**①作为本地消息读取工具:** 只用 `tools/wechat_read.py` 对应的命令,把微信聊天作为本地 AI 的输入源,不跑整个服务。
-
-```bash
-wechat-cli search "" --chat "联系人" --start-time "2026-05-01" --limit 30
-wechat-cli new-messages
-wechat-cli contacts --query "姓名"
-```
-
-**②作为自动回复 PoC:** 在白名单联系人 + 低风险场景下做端到端验证。不建议直接对全部联系人启用全自动。
-
-**③作为后续重构的底座:** 沿着上面"还没实现"清单继续扩展。
-
-## 免责声明
-
-本项目依赖本地微信数据读取和自动化发送能力,请自行确认账号风险、稳定性和合规性。**强烈建议**先在白名单联系人 + 低风险场景下验证,再考虑扩大启用范围。
+[MIT](LICENSE)
