@@ -23,6 +23,17 @@
   .status.off { background:#ccc; }
   .chat-box { display:flex; gap:8px; margin-top:12px; }
   .chat-box input { flex:1; padding:10px 12px; border:1px solid #ddd; border-radius:8px; font-size:14px; }
+  .draft { border:1px solid #f0c36d; background:#fffbe6; border-radius:8px; padding:12px; margin-bottom:10px; }
+  .draft-head { font-size:12px; color:#999; margin-bottom:6px; }
+  .draft-msg { font-size:13px; color:#666; margin-bottom:8px; padding:6px 8px; background:#f7f7f7; border-radius:4px; }
+  .draft textarea { width:100%; min-height:60px; padding:8px; border:1px solid #ddd; border-radius:6px; font-size:14px; font-family:inherit; }
+  .draft-actions { display:flex; gap:8px; margin-top:8px; }
+  .draft-actions button { padding:6px 14px; font-size:13px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; color:white; }
+  .badge.high { background:#ff4d4f; }
+  .badge.medium { background:#faad14; }
+  .badge.low { background:#52c41a; }
+  .empty { color:#999; font-size:13px; text-align:center; padding:12px; }
 </style>
 </head>
 <body>
@@ -52,6 +63,11 @@
     <option value="desktop" {{'selected' if send_method=='desktop'}}>💻 桌面微信</option>
     <option value="phone" {{'selected' if send_method=='phone'}}>📱 手机发送</option>
   </select>
+</div>
+
+<div class="card">
+  <h2>待审批草稿 <span id="draftCount" style="font-size:13px;color:#999;"></span></h2>
+  <div id="draftList"><div class="empty">加载中...</div></div>
 </div>
 
 <div class="card">
@@ -103,7 +119,61 @@ setInterval(() => {
       btn.className = 'btn btn-red';
     }
   });
+  refreshDrafts();
 }, 5000);
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function refreshDrafts() {
+  fetch('/api/drafts').then(r=>r.json()).then(d=>{
+    const list = document.getElementById('draftList');
+    const count = document.getElementById('draftCount');
+    const drafts = d.drafts || [];
+    count.textContent = drafts.length ? `(${drafts.length})` : '';
+    if (!drafts.length) {
+      list.innerHTML = '<div class="empty">暂无待审批草稿</div>';
+      return;
+    }
+    list.innerHTML = drafts.map(d => `
+      <div class="draft" id="draft-${d.id}">
+        <div class="draft-head">
+          #${d.id} · ${escapeHtml(d.chat)} · ${escapeHtml(d.created_at)}
+          <span class="badge ${d.risk}">${d.risk}</span>
+        </div>
+        <div class="draft-msg">📩 ${escapeHtml(d.original_msg)}</div>
+        <textarea id="reply-${d.id}">${escapeHtml(d.draft_reply)}</textarea>
+        <div class="draft-actions">
+          <button class="btn btn-green" onclick="approveDraft(${d.id})">通过并发送</button>
+          <button class="btn btn-red" onclick="rejectDraft(${d.id})">拒绝</button>
+        </div>
+      </div>
+    `).join('');
+  });
+}
+
+function approveDraft(id) {
+  const reply = document.getElementById(`reply-${id}`).value;
+  fetch(`/api/drafts/${id}/approve`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reply})
+  }).then(r=>r.json()).then(d=>{
+    if (d.ok) { refreshDrafts(); refreshLogs(); }
+    else { alert(d.error || '失败'); }
+  });
+}
+
+function rejectDraft(id) {
+  if (!confirm('确认拒绝这条草稿?')) return;
+  fetch(`/api/drafts/${id}/reject`, {method:'POST'}).then(r=>r.json()).then(d=>{
+    if (d.ok) { refreshDrafts(); refreshLogs(); }
+    else { alert(d.error || '失败'); }
+  });
+}
+
+refreshDrafts();
 </script>
 </body>
 </html>

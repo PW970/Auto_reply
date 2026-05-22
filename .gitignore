@@ -9,6 +9,10 @@
 *.log
 agent.log
 
+# 本地草稿/反馈数据库
+drafts.db
+drafts.db-journal
+
 # Python
 __pycache__/
 *.py[cod]

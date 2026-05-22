@@ -10,6 +10,11 @@ from fastapi.templating import Jinja2Templates
 from config import load_contact_config as load_config, save_contact_config as save_config, LOG_PATH, WECHAT_CLI, PORT, SELF_NAMES, DEEPSEEK_ENABLED
 from agent import create_agent
 from analyzer import analyze_message, format_brief
+import drafts
+from tools.wechat_send import send_wechat_message
+from tools.phone_control import send_via_phone
+
+HIGH_RISK_NEEDS_APPROVAL = True  # risk=high 走草稿审批,low/medium 自动发
 
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 
@@ -117,69 +122,151 @@ async def get_status():
         "send_method": cfg.get("send_method", "desktop"),
         "cli_tools": cli_available,
         "deepseek_enabled": DEEPSEEK_ENABLED,
+        "drafts": drafts.stats(),
     }
+
+
+# ── 草稿审批 API ──
+
+@app.get("/api/drafts")
+async def get_drafts():
+    return {"drafts": drafts.list_pending()}
+
+
+@app.post("/api/drafts/{draft_id}/approve")
+async def approve_draft(draft_id: int, request: Request):
+    body = await request.json() if await request.body() else {}
+    d = drafts.get_draft(draft_id)
+    if not d or d["status"] != "pending":
+        return {"ok": False, "error": "草稿不存在或已处理"}
+
+    final = (body.get("reply") or d["draft_reply"]).strip()
+    if not final:
+        return {"ok": False, "error": "回复内容为空"}
+
+    cfg = load_config()
+    method = cfg.get("send_method", "desktop")
+    add_log(f"[审批] 通过草稿 #{draft_id} → {d['chat']} ({method})")
+
+    drafts.decide(draft_id, "approved", final_reply=final)
+
+    try:
+        if method == "phone":
+            send_result = send_via_phone.invoke({"contact": d["chat"], "message": final})
+        else:
+            send_result = send_wechat_message.invoke({"contact": d["chat"], "message": final})
+        drafts.decide(draft_id, "sent", final_reply=final)
+        add_log(f"[审批]   已发送: {str(send_result)[:80]}")
+        return {"ok": True, "sent": str(send_result)}
+    except Exception as e:
+        add_log(f"[审批]   发送失败: {e}")
+        return {"ok": False, "error": f"发送失败: {e}"}
+
+
+@app.post("/api/drafts/{draft_id}/reject")
+async def reject_draft(draft_id: int):
+    if drafts.decide(draft_id, "rejected"):
+        add_log(f"[审批] 拒绝草稿 #{draft_id}")
+        return {"ok": True}
+    return {"ok": False, "error": "草稿不存在或已处理"}
 
 # ── 后台轮询 ──
 
-async def poll_loop():
-    import subprocess, json, re
-    today_str = datetime.now().strftime("%Y-%m-%d")
+async def _fetch_new_messages():
+    import subprocess
+    r = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: subprocess.run(
+            [WECHAT_CLI, "new-messages"], capture_output=True, text=True, timeout=30)
+    )
+    try:
+        raw = r.stdout.strip()
+        return json.loads(raw[raw.index("{"):]) if "{" in raw else {}
+    except (json.JSONDecodeError, ValueError):
+        return None
 
-    # ── 启动检测：用 new-messages 拿所有新消息 ──
-    async def startup_check():
-        cfg = load_config()
-        contacts = cfg.get("enabled_contacts", [])
-        add_log(f"[启动] 检查新消息...")
-        r = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: subprocess.run(
-                [WECHAT_CLI, "new-messages"], capture_output=True, text=True, timeout=30)
+
+async def _fetch_context(chat: str, today_str: str, fallback: str) -> str:
+    import subprocess
+    r2 = await asyncio.get_event_loop().run_in_executor(
+        None, lambda c=chat: subprocess.run(
+            [WECHAT_CLI, "search", "", "--chat", c, "--start-time", today_str, "--limit", "15"],
+            capture_output=True, text=True, timeout=30)
+    )
+    try:
+        raw2 = r2.stdout.strip()
+        ctx = json.loads(raw2[raw2.index("{"):])
+        return "\n".join(ctx.get("results", [])[-10:])
+    except Exception:
+        return fallback
+
+
+async def process_one_message(msg: dict, cfg: dict, tag: str = "轮询"):
+    """处理一条新消息:分析 → 按 risk 分流 → 自动发送 / 落库审批"""
+    chat = msg.get("chat", "")
+    sender = msg.get("sender", "")
+    content = msg.get("last_message", "")
+    add_log(f"[{tag}]   [{chat}] {sender}: {content[:60]}")
+    if sender in SELF_NAMES:
+        add_log(f"[{tag}]   {chat} 自己发的,跳过")
+        return
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    context = await _fetch_context(chat, today_str, f"[{chat}] {sender}: {content}")
+    analysis = await analyze_message(chat, sender, content, context=context)
+    risk = analysis.get("risk", "medium")
+    add_log(f"[{tag}]   [DeepSeek] {chat} risk={risk} {analysis.get('summary','')}")
+
+    needs_approval = HIGH_RISK_NEEDS_APPROVAL and risk == "high"
+
+    if needs_approval:
+        # 高风险:让 Agent 只生成回复文本,不调发送工具
+        prompt = (
+            f"以下是 [{chat}] 的聊天记录:\n{context}\n\n"
+            f"{format_brief(analysis)}\n\n"
+            f"⚠️ 这是高风险消息,**不要调用任何发送工具**。\n"
+            f"请直接输出你建议的回复内容(纯文本,不要解释,不要加引号,不要 tool call)。\n"
+            f"个性: {cfg.get('personality','')}"
         )
-        try:
-            raw = r.stdout.strip()
-            data = json.loads(raw[raw.index("{"):]) if "{" in raw else {}
-        except:
-            data = {}
-        msgs = data.get("messages", [])
-        relevant = [m for m in msgs if m.get("chat") in contacts]
-        if not relevant:
-            add_log(f"[启动] 没有未处理的新消息")
-            return
+    else:
+        prompt = (
+            f"有新消息来自 [{chat}],以下是聊天记录:\n{context}\n\n"
+            f"{format_brief(analysis)}\n\n"
+            f"请基于以上预分析和聊天记录,调用 send_wechat_message(contact=\"{chat}\", message=...) 回复。"
+            f"个性: {cfg.get('personality','')}"
+        )
+
+    result = await agent_executor.ainvoke({"messages": [("human", prompt)]})
+    out_msgs = result.get("messages", [])
+    reply_text = out_msgs[-1].content if out_msgs else ""
+
+    if needs_approval:
+        draft_id = drafts.create_draft(
+            chat=chat, sender=sender, original_msg=content,
+            context=context, analysis_json=json.dumps(analysis, ensure_ascii=False),
+            draft_reply=reply_text, risk=risk,
+        )
+        add_log(f"[{tag}]   ⚠️ 高风险消息已落草稿 #{draft_id},等待 Web UI 审批")
+    else:
+        add_log(f"[{tag}]   [回复] {chat} agent 输出: {reply_text[:200]}")
+
+
+async def poll_loop():
+    # 启动检测
+    add_log(f"[启动] 检查新消息...")
+    cfg = load_config()
+    contacts = cfg.get("enabled_contacts", [])
+    data = await _fetch_new_messages() or {}
+    relevant = [m for m in data.get("messages", []) if m.get("chat") in contacts]
+    if not relevant:
+        add_log(f"[启动] 没有未处理的新消息")
+    else:
         add_log(f"[启动] 发现 {len(relevant)} 条新消息")
         for msg in relevant:
-            chat = msg.get("chat", "")
-            sender = msg.get("sender", "")
-            content = msg.get("last_message", "")
-            add_log(f"[启动]   [{chat}] {sender}: {content[:50]}")
-            if sender in SELF_NAMES:
-                add_log(f"[启动]   自己发的，跳过")
-                continue
-            add_log(f"[启动]   → 拉上下文，调 agent 回复 {chat}")
-            r2 = await asyncio.get_event_loop().run_in_executor(
-                None, lambda c=chat: subprocess.run(
-                    [WECHAT_CLI, "search", "", "--chat", c, "--start-time", today_str, "--limit", "15"],
-                    capture_output=True, text=True, timeout=30)
-            )
             try:
-                raw2 = r2.stdout.strip()
-                ctx_data = json.loads(raw2[raw2.index("{"):]) if "{" in raw2 else {}
-                context = "\n".join(ctx_data.get("results", [])[-10:])
-            except:
-                context = f"[{chat}] {sender}: {content}"
-            analysis = await analyze_message(chat, sender, content, context=context)
-            add_log(f"[启动]   [DeepSeek] {chat} risk={analysis.get('risk')} {analysis.get('summary','')}")
-            result = await agent_executor.ainvoke({
-                "messages": [("human",
-                    f"这是 [{chat}] 聊天记录：\n{context}\n\n"
-                    f"{format_brief(analysis)}\n\n"
-                    f"请基于以上预分析和聊天记录,调 send_wechat_message(contact=\"{chat}\", message=...) 回复。"
-                    f"个性：{cfg.get('personality','')}")]
-            })
-            reply = (result.get("messages", []) or [None])[-1]
-            reply_text = reply.content if reply else ""
-            add_log(f"[启动]   agent: {reply_text[:100]}")
-
-    await startup_check()
-    add_log("[启动] 启动检测完成，进入实时监听")
+                await process_one_message(msg, cfg, tag="启动")
+            except Exception as e:
+                add_log(f"[启动]   处理失败: {e}")
+    add_log("[启动] 启动检测完成,进入实时监听")
 
     while True:
         try:
@@ -188,63 +275,26 @@ async def poll_loop():
             if not contacts:
                 await asyncio.sleep(1); continue
 
-            # 轮询新消息
-            r = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(
-                    [WECHAT_CLI, "new-messages"], capture_output=True, text=True, timeout=30)
-            )
-            try:
-                raw = r.stdout.strip()
-                data = json.loads(raw[raw.index("{"):])
-            except (json.JSONDecodeError, ValueError):
+            data = await _fetch_new_messages()
+            if data is None:
                 await asyncio.sleep(1); continue
 
             new_msgs = data.get("messages", [])
 
-            # 每 30 秒打印监听状态
             poll_loop._count = getattr(poll_loop, "_count", 0) + 1
             if poll_loop._count % 30 == 0:
-                add_log(f"[监听] 最后检测: {datetime.now().strftime('%H:%M:%S')}，新消息数: {len(new_msgs)}")
+                add_log(f"[监听] 最后检测: {datetime.now().strftime('%H:%M:%S')},新消息数: {len(new_msgs)}")
 
             if new_msgs:
                 relevant = [m for m in new_msgs if m.get("chat") in contacts]
-                add_log(f"[轮询] new-messages 返回 {len(new_msgs)} 条，匹配联系人 {len(relevant)} 条")
+                add_log(f"[轮询] new-messages 返回 {len(new_msgs)} 条,匹配联系人 {len(relevant)} 条")
                 for m in new_msgs:
                     add_log(f"[轮询]   原始: [{m.get('chat','')}] {m.get('last_message','')[:50]}")
-                if relevant:
-                    today_str_now = datetime.now().strftime("%Y-%m-%d")
-                    for msg in relevant:
-                        chat = msg["chat"]
-                        sender = msg.get("sender", "")
-                        content = msg.get("last_message", "")
-                        add_log(f"[检测] {chat}: {content[:60]}")
-                        if sender in SELF_NAMES:
-                            add_log(f"[检测]   {chat} 是自己发的,跳过")
-                            continue
-                        r2 = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda c=chat: subprocess.run(
-                                [WECHAT_CLI, "search", "", "--chat", c, "--start-time", today_str_now, "--limit", "15"],
-                                capture_output=True, text=True, timeout=30)
-                        )
-                        try:
-                            raw2 = r2.stdout.strip()
-                            ctx = json.loads(raw2[raw2.index("{"):])
-                            context = "\n".join(ctx.get("results", [])[-10:])
-                        except Exception as e:
-                            add_log(f"[轮询]   {chat} 拉上下文失败: {e}")
-                            context = f"[{chat}] {sender}: {content}"
-                        analysis = await analyze_message(chat, sender, content, context=context)
-                        add_log(f"[轮询]   [DeepSeek] {chat} risk={analysis.get('risk')} {analysis.get('summary','')}")
-                        result = await agent_executor.ainvoke({
-                            "messages": [("human",
-                                f"有新消息来自 [{chat}],以下是聊天记录:\n{context}\n\n"
-                                f"{format_brief(analysis)}\n\n"
-                                f"请基于以上预分析和聊天记录,调用 send_wechat_message(contact=\"{chat}\", message=...) 回复。"
-                                f"个性: {cfg.get('personality','')}")]
-                        })
-                        out_msgs = result.get("messages", [])
-                        reply = out_msgs[-1].content if out_msgs else ""
-                        add_log(f"[回复] {chat} agent 输出: {reply[:200]}")
+                for msg in relevant:
+                    try:
+                        await process_one_message(msg, cfg, tag="轮询")
+                    except Exception as e:
+                        add_log(f"[轮询]   处理失败: {e}")
         except asyncio.CancelledError:
             break
         except Exception as e:
