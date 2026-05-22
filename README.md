@@ -1,4 +1,4 @@
-<h1 align="center">WeChat Auto Agent</h1>
+<h1 align="center">微信自动回复</h1>
 
 <p align="center">
   <b>从你的改写中学习如何像你本人说话的微信自动回复分身</b><br/>
