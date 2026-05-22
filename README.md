@@ -52,6 +52,9 @@ wechat-cli search 拉当天上下文
 - [x] `wechat-cli search` 拉取当天上下文
 - [x] **DeepSeek 预分析层**:每条消息先做 intent / emotion / risk / summary / reply_hint 五项分析,结果注入 Qwen prompt
 - [x] DeepSeek 失败/未配置时优雅降级,主流程不中断
+- [x] **risk=high 走草稿审批,Web UI 一键通过/改写/拒绝**
+- [x] **结构化风格画像 + per-contact 覆写** — 不再是单条 `personality` 字符串
+- [x] **改写 feedback 自动回流** — 用户改写过的草稿自动作为 few-shot 注入下次同联系人 prompt
 - [x] Qwen LangGraph ReAct Agent 调用工具发回复
 - [x] **Windows** 桌面微信发送(uiautomation)
 - [x] **macOS** 桌面微信发送(AppleScript + System Events,需授权辅助功能)
@@ -61,11 +64,8 @@ wechat-cli search 拉当天上下文
 
 ### 还没实现(路线图)
 
-- [ ] **风险分级实际拦截** — 当前 risk=high 只是日志打出,还没接审批流
-- [ ] **草稿模式 + 人工确认 UI**
 - [ ] **历史聊天导入与本地存储**(暂缓)
-- [ ] **风格学习** — 目前只有静态 `personality` 字符串
-- [ ] **per-contact 风格画像** — 跟老板/哥们/家人不同语气
+- [ ] **离线风格统计模块** — 从 feedback 样本聚合自动建议 `catchphrases` / `avoid`
 - [ ] **回复修改 feedback 回流** — 用户改写草稿的差异作为后续学习样本
 - [ ] **消息去重幂等**
 - [ ] DeepSeek 同时承担"生成"职责(目前仅分析,生成仍走 Qwen)
@@ -148,7 +148,7 @@ SELF_NAMES=我,你的微信名,你的姓名
 
 DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback 简报继续运行。
 
-### 联系人配置
+### 联系人与风格配置
 
 启动后会读取/写入项目根目录的 `wechat_agent.json`:
 
@@ -156,7 +156,31 @@ DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback
 {
   "enabled_contacts": ["联系人A", "联系人B"],
   "send_method": "desktop",
+
+  "style_profile": {
+    "tone": "直爽、干脆,像哥们聊天",
+    "sentence_length": "short",
+    "punctuation": "casual",
+    "emoji": "rarely",
+    "catchphrases": ["行", "妥了", "整"],
+    "avoid": ["亲", "宝子", "您"],
+    "examples": [
+      "行,我看下",
+      "明天上午整一下,问题不大"
+    ]
+  },
+
+  "contact_styles": {
+    "老板": {
+      "tone": "正式、稳重",
+      "punctuation": "standard",
+      "emoji": "never",
+      "catchphrases": ["收到", "好的"]
+    }
+  },
+
   "personality": "直爽、干脆,像哥们聊天",
+
   "available_cli_tools": {
     "claude": "claude"
   }
@@ -167,8 +191,32 @@ DeepSeek 没填 key 时 `DEEPSEEK_ENABLED` 自动降为 false,系统用 fallback
 |---|---|
 | `enabled_contacts` | 触发自动回复的联系人白名单 |
 | `send_method` | `desktop` 或 `phone` |
-| `personality` | 当前仅是静态字符串,会注入 prompt |
+| `style_profile` | 全局风格画像(结构化,见下表) |
+| `contact_styles` | 按联系人覆写,字段同 `style_profile`,留空字段用全局兜底 |
+| `personality` | **向后兼容**:没填 `style_profile` 时作为 `tone` 使用 |
 | `available_cli_tools` | 可选,注册额外 CLI 工具(只有命令在 PATH 中才会真正注册) |
+
+#### `style_profile` / `contact_styles` 字段
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `tone` | 自由文本 | 整体语气描述 |
+| `sentence_length` | `short` / `medium` / `long` / `mixed` | 句长偏好 |
+| `punctuation` | `casual` / `standard` / `strict` | 标点风格 |
+| `emoji` | `never` / `rarely` / `often` | emoji 使用频率 |
+| `catchphrases` | 字符串数组 | 你的口头禅 |
+| `avoid` | 字符串数组 | 禁用词/句式(比如 AI 腔的"宝子""亲") |
+| `examples` | 字符串数组 | 典型说话样本(2-5 条最佳) |
+
+#### 风格自学习(feedback 回流)
+
+每次你在 Web UI 上**修改**一条草稿后再发出,系统会把"AI 草稿 vs 你最终发出的版本"存到 `drafts.db`。下次同联系人来消息时,Agent 会拉最近 3 条改写样本作为 few-shot 注入 prompt — 你改一次,下次就开始往那个语气靠。
+
+可以通过 API 查看已沉淀的样本:
+```bash
+curl 'http://localhost:5679/api/feedback?contact=老板'
+curl 'http://localhost:5679/api/style?contact=老板'  # 查看合并后的最终画像
+```
 
 ## 启动
 
@@ -221,9 +269,8 @@ Web UI 当前能力:
 
 ## 已知限制
 
-- **风险分级未真正拦截** — high 风险消息也会自动发,Rule Engine 还没做
-- **风格学习未实现** — 只有静态 personality,不会从历史聊天学
 - **macOS 桌面发送需要辅助功能授权** — 首次运行会被系统拦,需在 系统设置 → 隐私与安全性 → 辅助功能 中加入运行 Python 的终端
+- **风格学习初版** — 当前仅靠 feedback 改写样本做 few-shot,没有"全量历史导入 + 离线统计"那套深度学习,样本积累需要时间
 - **`requirements.txt` 缺关键依赖** — `langgraph`、`uiautomation` 未列出
 - **无消息去重** — 依赖 `wechat-cli new-messages` 自身的增量语义
 - **`/api/chat` 无鉴权** — 默认监听 `0.0.0.0:5679`,生产场景应改为 `127.0.0.1` + token

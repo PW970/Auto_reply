@@ -11,6 +11,7 @@ from config import load_contact_config as load_config, save_contact_config as sa
 from agent import create_agent
 from analyzer import analyze_message, format_brief
 import drafts
+import style
 from tools.wechat_send import send_wechat_message
 from tools.phone_control import send_via_phone
 
@@ -170,6 +171,22 @@ async def reject_draft(draft_id: int):
         return {"ok": True}
     return {"ok": False, "error": "草稿不存在或已处理"}
 
+
+@app.get("/api/feedback")
+async def feedback_list(contact: str = "", limit: int = 20):
+    """已沉淀的改写样本 — 供风格学习作 few-shot"""
+    return {"samples": drafts.feedback_samples(contact=contact or None, limit=limit)}
+
+
+@app.get("/api/style")
+async def style_resolve(contact: str = ""):
+    """查看某联系人最终生效的合并风格画像"""
+    cfg = load_config()
+    return {
+        "profile": style.resolve_profile(cfg, contact),
+        "rendered": style.build_style_block(cfg, contact),
+    }
+
 # ── 后台轮询 ──
 
 async def _fetch_new_messages():
@@ -217,22 +234,23 @@ async def process_one_message(msg: dict, cfg: dict, tag: str = "轮询"):
     add_log(f"[{tag}]   [DeepSeek] {chat} risk={risk} {analysis.get('summary','')}")
 
     needs_approval = HIGH_RISK_NEEDS_APPROVAL and risk == "high"
+    style_block = style.build_style_block(cfg, chat)
 
     if needs_approval:
         # 高风险:让 Agent 只生成回复文本,不调发送工具
         prompt = (
             f"以下是 [{chat}] 的聊天记录:\n{context}\n\n"
             f"{format_brief(analysis)}\n\n"
+            f"{style_block}\n\n"
             f"⚠️ 这是高风险消息,**不要调用任何发送工具**。\n"
-            f"请直接输出你建议的回复内容(纯文本,不要解释,不要加引号,不要 tool call)。\n"
-            f"个性: {cfg.get('personality','')}"
+            f"请直接输出你建议的回复内容(纯文本,不要解释,不要加引号,不要 tool call)。"
         )
     else:
         prompt = (
             f"有新消息来自 [{chat}],以下是聊天记录:\n{context}\n\n"
             f"{format_brief(analysis)}\n\n"
-            f"请基于以上预分析和聊天记录,调用 send_wechat_message(contact=\"{chat}\", message=...) 回复。"
-            f"个性: {cfg.get('personality','')}"
+            f"{style_block}\n\n"
+            f"请基于以上预分析、聊天记录和风格说明,调用 send_wechat_message(contact=\"{chat}\", message=...) 回复。"
         )
 
     result = await agent_executor.ainvoke({"messages": [("human", prompt)]})

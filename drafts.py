@@ -93,6 +93,24 @@ def decide(draft_id: int, status: str, final_reply: Optional[str] = None) -> boo
         return cur.rowcount > 0
 
 
+def feedback_samples(contact: Optional[str] = None, limit: int = 5) -> list[dict]:
+    """返回用户改写过的真实样本 (final_reply 与 draft_reply 不同),供风格 few-shot 用"""
+    sql = (
+        "SELECT chat, original_msg, draft_reply, final_reply, decided_at "
+        "FROM drafts "
+        "WHERE status='sent' AND final_reply IS NOT NULL "
+        "AND TRIM(final_reply) != TRIM(draft_reply)"
+    )
+    args: list = []
+    if contact:
+        sql += " AND chat=?"
+        args.append(contact)
+    sql += " ORDER BY decided_at DESC LIMIT ?"
+    args.append(limit)
+    rows = _get_conn().execute(sql, args).fetchall()
+    return [dict(r) for r in rows]
+
+
 def stats() -> dict:
     rows = _get_conn().execute(
         "SELECT status, COUNT(*) AS n FROM drafts GROUP BY status"
